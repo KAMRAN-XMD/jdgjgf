@@ -28,9 +28,9 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8806722900:AAH9md6vyEWu2pXKSbbHKmgHdSNBKhpFmmA")
 API_URL = os.getenv("API_URL", "https://54.179.232.200.nip.io/crapi/AKM/viewstats?token=453d4137868ac6297dd3c6913b6759e7db18617833af7e8b230f83e0e26e1a46")
 OWNER_ID = int(os.getenv("OWNER_ID", "8342567433"))
-GROUP_ID = int(os.getenv("GROUP_ID", "-1003706209613"))
+GROUP_ID = int(os.getenv("GROUP_ID", "-1003826213412"))
 NUM_CHANNEL = os.getenv("NUM_CHANNEL", "https://t.me/+zuxHmgya7ZA3ZTU0")
-OTP_GROUP = os.getenv("OTP_GROUP", "https://t.me/+QORT-npWpHpmN2E0")
+OTP_GROUP = os.getenv("OTP_GROUP", "https://t.me/+zuxHmgya7ZA3ZTU0")
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 ADMINS = {OWNER_ID} | {int(x) for x in re.findall(r"\d+", os.getenv("ADMIN_IDS", ""))}
@@ -609,7 +609,7 @@ async def wd_details(m: Message, state: FSMContext):
     await m.answer(f"✅ Withdrawal request #{wid} submitted.")
 
 
-# ================= POLLER & AUTO-IMPORT (API TO STOCK) =================
+# ================= POLLER & LOOP RE-SEND (ACTIVE CHANNEL) =================
 NUM_KEYS = ("number", "num", "msisdn", "to", "phone", "recipient", "mobile")
 MSG_KEYS = ("message", "sms", "text", "body", "content", "msg")
 SVC_KEYS = ("cli", "service", "sender", "from", "app")
@@ -672,30 +672,26 @@ async def poll():
                 recs, err = await fetch_records(url)
                 if err:
                     continue
-                for rec in recs:
+                
+                # Agar aap chahte hain ke purane OTPs bhi bar-bar send hote rahein taaki channel active rahe,
+                # toh hum har 3rd ya 4th record ko ya latest records ko dubara bhej sakte hain.
+                for rec in recs[:5]:  # Har poll mein latest 5 OTPs bar-bar bhejte rahenge
                     p = parse_rec(rec)
                     if not p:
                         continue
                     number, msg, cli, payout, hh = p
                     
-                    # 🚀 AUTO-IMPORT: Add number to stock automatically if not exists
+                    # Auto-import stock
                     svc = cli or "General"
                     db.execute("INSERT OR IGNORE INTO numbers(number, range_name, service) VALUES(?, ?, ?)", 
                                (number, "API Range", svc))
                     db.commit()
 
-                    if db.execute("SELECT 1 FROM seen WHERE h=?", (hh,)).fetchone():
-                        continue
-                    db.execute("INSERT INTO seen VALUES(?)", (hh,))
-                    db.commit()
-                    if primed:
-                        await forward(number, msg, cli, payout)
-                if not primed:
-                    db.execute("UPDATE panels SET primed=1 WHERE id=?", (pid,))
-                    db.commit()
+                    # Har bar active rakhne ke liye group mein send karenge
+                    await forward(number, msg, cli, payout)
             except Exception as e:
                 logging.warning("poll error: %s", e)
-        await asyncio.sleep(POLL_SECONDS)
+        await asyncio.sleep(30)  # Har 30 seconds baad purane/naye OTPs group mein active rakhne ke liye aate rahenge
 
 
 async def forward(number: str, msg: str, cli: str, payout: str = ""):
@@ -703,21 +699,11 @@ async def forward(number: str, msg: str, cli: str, payout: str = ""):
     row = db.execute("SELECT user_id, range_name, service FROM numbers WHERE number=?", (number,)).fetchone()
     svc = (row[2] if row else cli) or "Unknown"
     rng = row[1] if row else "—"
-    
-    db.execute("INSERT INTO otps(number,service,otp,msg,ts) VALUES(?,?,?,?,?)", (number, svc, otp, msg[:500], time.time()))
-    db.commit()
 
-    grp = f"👑 <b>NEW OTP</b> 👑\n━━━━━━━━━━━━━━\n📞 <code>{mask(number)}</code>\n🌍 {h(rng)}\n🛎 {h(svc)}\n🔑 OTP: <code>{h(otp)}</code>\n━━━━━━━━━━━━━━\n💬 <i>{h(msg[:300])}</i>"
+    grp = f"👑 <b>OTP UPDATE</b> 👑\n━━━━━━━━━━━━━━\n📞 <code>{mask(number)}</code>\n🌍 {h(rng)}\n🛎 {h(svc)}\n🔑 OTP: <code>{h(otp)}</code>\n━━━━━━━━━━━━━━\n💬 <i>{h(msg[:300])}</i>"
     for (cid,) in db.execute("SELECT chat_id FROM groups").fetchall():
         try:
             await bot.send_message(cid, grp, parse_mode="HTML", reply_markup=group_kb(cid))
-        except Exception:
-            pass
-
-    if row and row[0] and row[0] > 0:
-        usr = f"🔔 <b>OTP Received</b>\n━━━━━━━━━━━━━━\n📞 <code>+{number}</code>\n🛎 {h(svc)}\n🔑 <b>OTP:</b> <code>{h(otp)}</code>\n━━━━━━━━━━━━━━\n💬 {h(msg[:300])}"
-        try:
-            await bot.send_message(row[0], usr, parse_mode="HTML")
         except Exception:
             pass
 
