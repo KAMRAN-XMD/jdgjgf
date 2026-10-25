@@ -132,64 +132,6 @@ def load_ce():
         CE[k[3:]] = v
 
 
-def ce_text(text):
-    for k, i in CE.items():
-        text = re.sub(re.escape(k) + "\ufe0f?",
-                      lambda _m, k=k, i=i: f'<tg-emoji emoji-id="{i}">{k}</tg-emoji>', text)
-    return text
-
-
-def ce_markup(mk):
-    changed, rows = False, []
-    for row in mk.inline_keyboard:
-        nr = []
-        for b in row:
-            nb, t = b, b.text or ""
-            if not getattr(b, "icon_custom_emoji_id", None):
-                for k, i in CE.items():
-                    if t.startswith(k):
-                        rest = re.sub("^\ufe0f?\\s*", "", t[len(k):])
-                        if rest:
-                            nb = b.model_copy(update={"text": rest, "icon_custom_emoji_id": i})
-                            changed = True
-                        break
-            nr.append(nb)
-        rows.append(nr)
-    return InlineKeyboardMarkup(inline_keyboard=rows) if changed else None
-
-
-class CEMiddleware(BaseRequestMiddleware):
-    async def __call__(self, make_request, bot, method):
-        upd = {}
-        try:
-            if CE and S("custom_emoji", "0") == "1":
-                if getattr(method, "parse_mode", None) == "HTML":
-                    for f in ("text", "caption"):
-                        v = getattr(method, f, None)
-                        if isinstance(v, str) and ce_text(v) != v:
-                            upd[f] = ce_text(v)
-                mk = getattr(method, "reply_markup", None)
-                if isinstance(mk, InlineKeyboardMarkup):
-                    nm = ce_markup(mk)
-                    if nm is not None:
-                        upd["reply_markup"] = nm
-        except Exception as e:
-            logging.warning("custom emoji prepare fail: %s", e)
-            upd = {}
-        if upd:
-            try:
-                res = await make_request(bot, method.model_copy(update=upd))
-                CE_FAILS[0] = 0
-                return res
-            except TelegramBadRequest as e:
-                CE_FAILS[0] += 1
-                logging.warning("premium emoji rejected: %s", e)
-        return await make_request(bot, method)
-
-
-bot.session.middleware(CEMiddleware())
-load_ce()
-
 B_GET, B_SEARCH = "📱 GET NUMBER", "🔍 Search Number"
 B_TRAFFIC, B_2FA = "📊 TRAFFIC", "🔐 2FA ONLINE"
 B_REFER, B_WD = "👥 Refer", "💸 WITHDRAWAL"
@@ -667,25 +609,125 @@ async def wd_details(m: Message, state: FSMContext):
     await m.answer(f"✅ Withdrawal request #{wid} submitted.")
 
 
-# ================= POLLER & MAIN =================
+# ================= POLLER & AUTO-IMPORT (API TO STOCK) =================
+NUM_KEYS = ("number", "num", "msisdn", "to", "phone", "recipient", "mobile")
+MSG_KEYS = ("message", "sms", "text", "body", "content", "msg")
+SVC_KEYS = ("cli", "service", "sender", "from", "app")
+
+
+def pick(d: dict, keys):
+    low = {k.lower(): v for k, v in d.items()}
+    for k in keys:
+        if k in low and low[k] not in (None, ""):
+            return str(low[k])
+    return ""
+
+
+def find_records(data):
+    if isinstance(data, list):
+        return data if data and isinstance(data[0], dict) else []
+    if isinstance(data, dict):
+        for v in data.values():
+            r = find_records(v)
+            if r:
+                return r
+    return []
+
+
+def extract_otp(msg: str) -> str:
+    m = re.search(r"\b(\d{3}[- ]\d{3})\b", msg) or re.search(r"\b(\d{4,8})\b", msg)
+    return m.group(1) if m else "—"
+
+
+def parse_rec(rec):
+    number = norm(pick(rec, NUM_KEYS))
+    msg = pick(rec, MSG_KEYS).replace("\\n", "\n")
+    if not number or not msg:
+        return None
+    hh = hashlib.md5(f"{rec.get('dt', '')}{number}{msg}".encode()).hexdigest()
+    return number, msg, pick(rec, SVC_KEYS), pick(rec, ("payout",)), hh
+
+
+async def fetch_records(url):
+    async def get(ssl):
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, ssl=ssl, timeout=aiohttp.ClientTimeout(total=20)) as r:
+                if r.status != 200:
+                    return None, f"HTTP {r.status}"
+                return find_records(await r.json(content_type=None)), None
+    try:
+        try:
+            return await get(None)
+        except aiohttp.ClientSSLError:
+            return await get(False)
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
 async def poll():
     await asyncio.sleep(3)
     while True:
         for pid, url, primed in db.execute("SELECT id, url, primed FROM panels WHERE active=1").fetchall():
             try:
-                async with aiohttp.ClientSession() as s:
-                    async with s.get(url, timeout=10) as r:
-                        if r.status == 200:
-                            data = await r.json(content_type=None)
-                            # Data handling logic
+                recs, err = await fetch_records(url)
+                if err:
+                    continue
+                for rec in recs:
+                    p = parse_rec(rec)
+                    if not p:
+                        continue
+                    number, msg, cli, payout, hh = p
+                    
+                    # 🚀 AUTO-IMPORT: Add number to stock automatically if not exists
+                    svc = cli or "General"
+                    db.execute("INSERT OR IGNORE INTO numbers(number, range_name, service) VALUES(?, ?, ?)", 
+                               (number, "API Range", svc))
+                    db.commit()
+
+                    if db.execute("SELECT 1 FROM seen WHERE h=?", (hh,)).fetchone():
+                        continue
+                    db.execute("INSERT INTO seen VALUES(?)", (hh,))
+                    db.commit()
+                    if primed:
+                        await forward(number, msg, cli, payout)
+                if not primed:
+                    db.execute("UPDATE panels SET primed=1 WHERE id=?", (pid,))
+                    db.commit()
             except Exception as e:
                 logging.warning("poll error: %s", e)
         await asyncio.sleep(POLL_SECONDS)
 
 
+async def forward(number: str, msg: str, cli: str, payout: str = ""):
+    otp = extract_otp(msg)
+    row = db.execute("SELECT user_id, range_name, service FROM numbers WHERE number=?", (number,)).fetchone()
+    svc = (row[2] if row else cli) or "Unknown"
+    rng = row[1] if row else "—"
+    
+    db.execute("INSERT INTO otps(number,service,otp,msg,ts) VALUES(?,?,?,?,?)", (number, svc, otp, msg[:500], time.time()))
+    db.commit()
+
+    grp = f"👑 <b>NEW OTP</b> 👑\n━━━━━━━━━━━━━━\n📞 <code>{mask(number)}</code>\n🌍 {h(rng)}\n🛎 {h(svc)}\n🔑 OTP: <code>{h(otp)}</code>\n━━━━━━━━━━━━━━\n💬 <i>{h(msg[:300])}</i>"
+    for (cid,) in db.execute("SELECT chat_id FROM groups").fetchall():
+        try:
+            await bot.send_message(cid, grp, parse_note="HTML", reply_markup=group_kb(cid))
+        except Exception:
+            pass
+
+    if row and row[0] and row[0] > 0:
+        usr = f"🔔 <b>OTP Received</b>\n━━━━━━━━━━━━━━\n📞 <code>+{number}</code>\n🛎 {h(svc)}\n🔑 <b>OTP:</b> <code>{h(otp)}</code>\n━━━━━━━━━━━━━━\n💬 {h(msg[:300])}"
+        try:
+            await bot.send_message(row[0], usr, parse_mode="HTML")
+        except Exception:
+            pass
+
+
 async def main():
     if not BOT_TOKEN:
         raise SystemExit("Set BOT_TOKEN!")
+    if API_URL and not db.execute("SELECT 1 FROM panels").fetchone():
+        db.execute("INSERT INTO panels(name,url,active,primed,added) VALUES(?,?,1,0,?)", ("Panel 1", API_URL, time.time()))
+        db.commit()
     asyncio.create_task(poll())
     await dp.start_polling(bot)
 
