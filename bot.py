@@ -28,9 +28,9 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8806722900:AAH9md6vyEWu2pXKSbbHKmgHdSNBKhpFmmA")
 API_URL = os.getenv("API_URL", "https://54.179.232.200.nip.io/crapi/AKM/viewstats?token=453d4137868ac6297dd3c6913b6759e7db18617833af7e8b230f83e0e26e1a46")
 OWNER_ID = int(os.getenv("OWNER_ID", "8342567433"))
-GROUP_ID = int(os.getenv("GROUP_ID", "-1003826213412"))
+GROUP_ID = int(os.getenv("GROUP_ID", "-1003706209613"))
 NUM_CHANNEL = os.getenv("NUM_CHANNEL", "https://t.me/+zuxHmgya7ZA3ZTU0")
-OTP_GROUP = os.getenv("OTP_GROUP", "https://t.me/+zuxHmgya7ZA3ZTU0")
+OTP_GROUP = os.getenv("OTP_GROUP", "https://t.me/+QORT-npWpHpmN2E0")
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 ADMINS = {OWNER_ID} | {int(x) for x in re.findall(r"\d+", os.getenv("ADMIN_IDS", ""))}
@@ -710,7 +710,7 @@ async def forward(number: str, msg: str, cli: str, payout: str = ""):
     grp = f"👑 <b>NEW OTP</b> 👑\n━━━━━━━━━━━━━━\n📞 <code>{mask(number)}</code>\n🌍 {h(rng)}\n🛎 {h(svc)}\n🔑 OTP: <code>{h(otp)}</code>\n━━━━━━━━━━━━━━\n💬 <i>{h(msg[:300])}</i>"
     for (cid,) in db.execute("SELECT chat_id FROM groups").fetchall():
         try:
-            await bot.send_message(cid, grp, parse_note="HTML", reply_markup=group_kb(cid))
+            await bot.send_message(cid, grp, parse_mode="HTML", reply_markup=group_kb(cid))
         except Exception:
             pass
 
