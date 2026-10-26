@@ -30,9 +30,9 @@ OTP_API_URL = os.getenv("OTP_API_URL", "https://api.omegatech.app/api/tools/Temp
 NUM_API_URL = os.getenv("NUM_API_URL", "https://api.omegatech.app/api/tools/Temp-number?action=numbers&limit=5000")
 
 OWNER_ID = int(os.getenv("OWNER_ID", "8342567433"))
-GROUP_ID = int(os.getenv("GROUP_ID", "-1003826213412"))
+GROUP_ID = int(os.getenv("GROUP_ID", "-1003706209613"))
 NUM_CHANNEL = os.getenv("NUM_CHANNEL", "https://t.me/+zuxHmgya7ZA3ZTU0")
-OTP_GROUP = os.getenv("OTP_GROUP", "https://t.me/+zuxHmgya7ZA3ZTU0")
+OTP_GROUP = os.getenv("OTP_GROUP", "https://t.me/+QORT-npWpHpmN2E0")
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 ADMINS = {OWNER_ID} | {int(x) for x in re.findall(r"\d+", os.getenv("ADMIN_IDS", ""))}
