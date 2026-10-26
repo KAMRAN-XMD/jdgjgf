@@ -26,7 +26,9 @@ logging.basicConfig(level=logging.INFO)
 
 # ================= CONFIG (Environment Variables) =================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8806722900:AAH9md6vyEWu2pXKSbbHKmgHdSNBKhpFmmA")
-API_URL = os.getenv("API_URL", "https://54.179.232.200.nip.io/crapi/AKM/viewstats?token=453d4137868ac6297dd3c6913b6759e7db18617833af7e8b230f83e0e26e1a46")
+OTP_API_URL = os.getenv("OTP_API_URL", "https://api.omegatech.app/api/tools/Temp-number?action=otps&limit=2000")
+NUM_API_URL = os.getenv("NUM_API_URL", "https://api.omegatech.app/api/tools/Temp-number?action=numbers&limit=5000")
+
 OWNER_ID = int(os.getenv("OWNER_ID", "8342567433"))
 GROUP_ID = int(os.getenv("GROUP_ID", "-1003826213412"))
 NUM_CHANNEL = os.getenv("NUM_CHANNEL", "https://t.me/+zuxHmgya7ZA3ZTU0")
@@ -49,9 +51,6 @@ CREATE TABLE IF NOT EXISTS otps(
 CREATE TABLE IF NOT EXISTS groups(
   chat_id INTEGER PRIMARY KEY, channel_url TEXT, group_url TEXT);
 CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT);
-CREATE TABLE IF NOT EXISTS panels(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, url TEXT,
-  active INTEGER DEFAULT 1, primed INTEGER DEFAULT 0, added REAL);
 CREATE TABLE IF NOT EXISTS uledger(
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL, kind TEXT, note TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS uwd(
@@ -144,12 +143,6 @@ class AddFlow(StatesGroup):
     numbers = State()
 
 
-class PanelFlow(StatesGroup):
-    name = State()
-    url = State()
-    confirm = State()
-
-
 class SearchFlow(StatesGroup):
     q = State()
 
@@ -162,18 +155,6 @@ class WdFlow(StatesGroup):
     amount = State()
     method = State()
     details = State()
-
-
-class SupportFlow(StatesGroup):
-    text = State()
-
-
-class BcFlow(StatesGroup):
-    text = State()
-
-
-class SetFlow(StatesGroup):
-    value = State()
 
 
 h = html.escape
@@ -609,7 +590,7 @@ async def wd_details(m: Message, state: FSMContext):
     await m.answer(f"✅ Withdrawal request #{wid} submitted.")
 
 
-# ================= POLLER & LOOP RE-SEND (ACTIVE CHANNEL) =================
+# ================= DUAL API POLLER (NUMBERS + OTPS) =================
 NUM_KEYS = ("number", "num", "msisdn", "to", "phone", "recipient", "mobile")
 MSG_KEYS = ("message", "sms", "text", "body", "content", "msg")
 SVC_KEYS = ("cli", "service", "sender", "from", "app")
@@ -639,68 +620,66 @@ def extract_otp(msg: str) -> str:
     return m.group(1) if m else "—"
 
 
-def parse_rec(rec):
-    number = norm(pick(rec, NUM_KEYS))
-    msg = pick(rec, MSG_KEYS).replace("\\n", "\n")
-    if not number or not msg:
-        return None
-    hh = hashlib.md5(f"{rec.get('dt', '')}{number}{msg}".encode()).hexdigest()
-    return number, msg, pick(rec, SVC_KEYS), pick(rec, ("payout",)), hh
-
-
-async def fetch_records(url):
+async def fetch_api(url):
     async def get(ssl):
         async with aiohttp.ClientSession() as s:
             async with s.get(url, ssl=ssl, timeout=aiohttp.ClientTimeout(total=20)) as r:
                 if r.status != 200:
-                    return None, f"HTTP {r.status}"
-                return find_records(await r.json(content_type=None)), None
+                    return None
+                return find_records(await r.json(content_type=None))
     try:
         try:
             return await get(None)
         except aiohttp.ClientSSLError:
             return await get(False)
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+    except Exception:
+        return None
 
 
-async def poll():
+async def sync_numbers():
+    while True:
+        recs = await fetch_api(NUM_API_URL)
+        if recs:
+            for rec in recs:
+                num = norm(pick(rec, NUM_KEYS))
+                svc = pick(rec, SVC_KEYS) or "General"
+                rng = pick(rec, ("range", "country", "operator")) or "Omega Range"
+                if num:
+                    db.execute("INSERT OR IGNORE INTO numbers(number, range_name, service) VALUES(?, ?, ?)", 
+                               (num, rng, svc))
+            db.commit()
+        await asyncio.sleep(60) # Har 1 minute mein fresh numbers sync honge
+
+
+async def poll_otps():
     await asyncio.sleep(3)
     while True:
-        for pid, url, primed in db.execute("SELECT id, url, primed FROM panels WHERE active=1").fetchall():
-            try:
-                recs, err = await fetch_records(url)
-                if err:
+        recs = await fetch_api(OTP_API_URL)
+        if recs:
+            for rec in recs[:10]: # Latest OTPs
+                number = norm(pick(rec, NUM_KEYS))
+                msg = pick(rec, MSG_KEYS).replace("\\n", "\n")
+                cli = pick(rec, SVC_KEYS)
+                if not number or not msg:
                     continue
                 
-                # Agar aap chahte hain ke purane OTPs bhi bar-bar send hote rahein taaki channel active rahe,
-                # toh hum har 3rd ya 4th record ko ya latest records ko dubara bhej sakte hain.
-                for rec in recs[:5]:  # Har poll mein latest 5 OTPs bar-bar bhejte rahenge
-                    p = parse_rec(rec)
-                    if not p:
-                        continue
-                    number, msg, cli, payout, hh = p
-                    
-                    # Auto-import stock
-                    svc = cli or "General"
-                    db.execute("INSERT OR IGNORE INTO numbers(number, range_name, service) VALUES(?, ?, ?)", 
-                               (number, "API Range", svc))
-                    db.commit()
+                hh = hashlib.md5(f"{rec.get('dt', '')}{number}{msg}".encode()).hexdigest()
+                if db.execute("SELECT 1 FROM seen WHERE h=?", (hh,)).fetchone():
+                    continue
+                db.execute("INSERT INTO seen VALUES(?)", (hh,))
+                db.commit()
 
-                    # Har bar active rakhne ke liye group mein send karenge
-                    await forward(number, msg, cli, payout)
-            except Exception as e:
-                logging.warning("poll error: %s", e)
-        await asyncio.sleep(30)  # Har 30 seconds baad purane/naye OTPs group mein active rakhne ke liye aate rahenge
+                await forward(number, msg, cli)
+        await asyncio.sleep(POLL_SECONDS)
 
 
-async def forward(number: str, msg: str, cli: str, payout: str = ""):
+async def forward(number: str, msg: str, cli: str):
     otp = extract_otp(msg)
     row = db.execute("SELECT user_id, range_name, service FROM numbers WHERE number=?", (number,)).fetchone()
     svc = (row[2] if row else cli) or "Unknown"
-    rng = row[1] if row else "—"
+    rng = row[1] if row else "Omega Range"
 
-    grp = f"👑 <b>OTP UPDATE</b> 👑\n━━━━━━━━━━━━━━\n📞 <code>{mask(number)}</code>\n🌍 {h(rng)}\n🛎 {h(svc)}\n🔑 OTP: <code>{h(otp)}</code>\n━━━━━━━━━━━━━━\n💬 <i>{h(msg[:300])}</i>"
+    grp = f"👑 <b>NEW OTP</b> 👑\n━━━━━━━━━━━━━━\n📞 <code>{mask(number)}</code>\n🌍 {h(rng)}\n🛎 {h(svc)}\n🔑 OTP: <code>{h(otp)}</code>\n━━━━━━━━━━━━━━\n💬 <i>{h(msg[:300])}</i>"
     for (cid,) in db.execute("SELECT chat_id FROM groups").fetchall():
         try:
             await bot.send_message(cid, grp, parse_mode="HTML", reply_markup=group_kb(cid))
@@ -711,10 +690,8 @@ async def forward(number: str, msg: str, cli: str, payout: str = ""):
 async def main():
     if not BOT_TOKEN:
         raise SystemExit("Set BOT_TOKEN!")
-    if API_URL and not db.execute("SELECT 1 FROM panels").fetchone():
-        db.execute("INSERT INTO panels(name,url,active,primed,added) VALUES(?,?,1,0,?)", ("Panel 1", API_URL, time.time()))
-        db.commit()
-    asyncio.create_task(poll())
+    asyncio.create_task(sync_numbers())
+    asyncio.create_task(poll_otps())
     await dp.start_polling(bot)
 
 
