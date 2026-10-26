@@ -592,7 +592,7 @@ async def wd_details(m: Message, state: FSMContext):
     await m.answer(f"✅ Withdrawal request #{wid} submitted.")
 
 
-# ================= DUAL API POLLER (STYLISH MINO FORMAT) =================
+# ================= DUAL API POLLER & GROUP LISTENER =================
 NUM_KEYS = ("number", "num", "msisdn", "to", "phone", "recipient", "mobile")
 MSG_KEYS = ("message", "sms", "text", "body", "content", "msg")
 SVC_KEYS = ("cli", "service", "sender", "from", "app")
@@ -623,7 +623,6 @@ def extract_otp(msg: str) -> str:
 
 
 def get_flag_and_code(num):
-    # Number prefix ke hisab se flag aur country code set karna
     n = str(num)
     if n.startswith("49"):
         return "🇩🇪", "#DE"
@@ -697,18 +696,17 @@ async def poll_otps():
                     db.execute("INSERT INTO seen VALUES(?)", (hh,))
                     db.commit()
 
-                    await forward_stylish(number, msg, cli)
+                    await forward_stylish(number, msg)
         except Exception as e:
             logging.warning("poll_otps error: %s", e)
         await asyncio.sleep(POLL_SECONDS)
 
 
-async def forward_stylish(number: str, msg: str, cli: str):
+async def forward_stylish(number: str, msg: str):
     otp = extract_otp(msg)
     flag, country_code = get_flag_and_code(number)
     masked_num = mask(number)
 
-    # Screenshot jaisa exact stylish format
     text = (
         f"<b>MINO SMS BOT</b>                                    🟢 <b>Admin</b>\n"
         f"{flag}  {country_code}   🏛 <code>{masked_num}</code>\n\n"
@@ -725,6 +723,36 @@ async def forward_stylish(number: str, msg: str, cli: str):
             await bot.send_message(cid, text, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
             logging.warning("stylish forward error: %s", e)
+
+
+# Incoming messages listener for external groups where bot is added
+@dp.message(F.chat.type.in_({"group", "supergroup"}))
+async def catch_external_group_messages(m: Message):
+    if m.text and any(char.isdigit() for char in m.text):
+        txt = m.text
+        # Extract digits/numbers and OTP from incoming text
+        nums = re.findall(r"\d{7,15}", txt)
+        otp_match = re.search(r"\b(\d{4,8})\b", txt)
+        if nums and otp_match:
+            number = nums[0]
+            otp = otp_match.group(1)
+            flag, country_code = get_flag_and_code(number)
+            masked_num = mask(number)
+
+            text = (
+                f"<b>MINO SMS BOT</b>                                    🟢 <b>Admin</b>\n"
+                f"{flag}  {country_code}   🏛 <code>{masked_num}</code>\n\n"
+                f"🛡 <code>{otp}</code>"
+            )
+            kb = ikb([
+                [btn("📱 NUMBER", url=NUM_CHANNEL, style="success"),
+                 btn("📢 CHANNEL", url=OTP_GROUP, style="danger")]
+            ])
+            for (cid,) in db.execute("SELECT chat_id FROM groups").fetchall():
+                try:
+                    await bot.send_message(cid, text, parse_mode="HTML", reply_markup=kb)
+                except Exception:
+                    pass
 
 
 async def main():
