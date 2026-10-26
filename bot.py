@@ -30,9 +30,9 @@ OTP_API_URL = os.getenv("OTP_API_URL", "https://api.omegatech.app/api/tools/Temp
 NUM_API_URL = os.getenv("NUM_API_URL", "https://api.omegatech.app/api/tools/Temp-number?action=numbers&limit=5000")
 
 OWNER_ID = int(os.getenv("OWNER_ID", "8342567433"))
-GROUP_ID = int(os.getenv("GROUP_ID", "-1003706209613"))
+GROUP_ID = int(os.getenv("GROUP_ID", "-1003826213412"))
 NUM_CHANNEL = os.getenv("NUM_CHANNEL", "https://t.me/+zuxHmgya7ZA3ZTU0")
-OTP_GROUP = os.getenv("OTP_GROUP", "https://t.me/+QORT-npWpHpmN2E0")
+OTP_GROUP = os.getenv("OTP_GROUP", "https://t.me/+zuxHmgya7ZA3ZTU0")
 POLL_SECONDS = int(os.getenv("POLL_SECONDS", "5"))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 ADMINS = {OWNER_ID} | {int(x) for x in re.findall(r"\d+", os.getenv("ADMIN_IDS", ""))}
@@ -165,7 +165,9 @@ def norm(n: str) -> str:
 
 
 def mask(n: str) -> str:
-    return n[:4] + "•••" + n[-3:] if len(n) > 8 else n
+    if len(n) > 7:
+        return n[:2] + "XXX" + n[-4:]
+    return n[:2] + "XXX"
 
 
 def auto_style(text):
@@ -213,7 +215,7 @@ def links_kb():
 def group_kb(chat_id: int):
     row = db.execute("SELECT channel_url, group_url FROM groups WHERE chat_id=?", (chat_id,)).fetchone()
     ch, gp = (row if row else (NUM_CHANNEL, OTP_GROUP))
-    return ikb([[btn("📢 Main Channel", url=ch), btn("💬 OTP Group", url=gp)]])
+    return ikb([[btn("📱 NUMBER", url=ch), btn("📢 CHANNEL", url=gp)]])
 
 
 async def edit(c: CallbackQuery, text, kb=None):
@@ -313,8 +315,8 @@ def is_verified(uid) -> bool:
 
 
 def join_buttons():
-    return [[btn("📢 Join Channel", url=NUM_CHANNEL, style="primary"),
-             btn("💬 Join Group", url=OTP_GROUP, style="primary")],
+    return [[btn("📱 NUMBER", url=NUM_CHANNEL, style="primary"),
+             btn("📢 CHANNEL", url=OTP_GROUP, style="danger")],
             [btn("✅ Verify", "joined", style="success")]]
 
 
@@ -590,14 +592,14 @@ async def wd_details(m: Message, state: FSMContext):
     await m.answer(f"✅ Withdrawal request #{wid} submitted.")
 
 
-# ================= DUAL API POLLER (NUMBERS + OTPS) =================
+# ================= DUAL API POLLER (STYLISH MINO FORMAT) =================
 NUM_KEYS = ("number", "num", "msisdn", "to", "phone", "recipient", "mobile")
 MSG_KEYS = ("message", "sms", "text", "body", "content", "msg")
 SVC_KEYS = ("cli", "service", "sender", "from", "app")
 
 
 def pick(d: dict, keys):
-    low = {k.lower(): v for k, v in d.items()}
+    low = {str(k).lower(): v for k, v in d.items()}
     for k in keys:
         if k in low and low[k] not in (None, ""):
             return str(low[k])
@@ -620,71 +622,109 @@ def extract_otp(msg: str) -> str:
     return m.group(1) if m else "—"
 
 
+def get_flag_and_code(num):
+    # Number prefix ke hisab se flag aur country code set karna
+    n = str(num)
+    if n.startswith("49"):
+        return "🇩🇪", "#DE"
+    elif n.startswith("1"):
+        return "🇺🇸", "#US"
+    elif n.startswith("237"):
+        return "🇨🇲", "#CM"
+    elif n.startswith("229"):
+        return "🇧🇯", "#BJ"
+    elif n.startswith("92"):
+        return "🇵🇰", "#PK"
+    elif n.startswith("44"):
+        return "🇬🇧", "#GB"
+    else:
+        return "🌍", "#INT"
+
+
 async def fetch_api(url):
     async def get(ssl):
         async with aiohttp.ClientSession() as s:
             async with s.get(url, ssl=ssl, timeout=aiohttp.ClientTimeout(total=20)) as r:
                 if r.status != 200:
                     return None
-                return find_records(await r.json(content_type=None))
+                res_json = await r.json(content_type=None)
+                return find_records(res_json)
     try:
         try:
             return await get(None)
         except aiohttp.ClientSSLError:
             return await get(False)
-    except Exception:
+    except Exception as e:
+        logging.warning("API fetch error: %s", e)
         return None
 
 
 async def sync_numbers():
+    await asyncio.sleep(2)
     while True:
-        recs = await fetch_api(NUM_API_URL)
-        if recs:
-            for rec in recs:
-                num = norm(pick(rec, NUM_KEYS))
-                svc = pick(rec, SVC_KEYS) or "General"
-                rng = pick(rec, ("range", "country", "operator")) or "Omega Range"
-                if num:
-                    db.execute("INSERT OR IGNORE INTO numbers(number, range_name, service) VALUES(?, ?, ?)", 
-                               (num, rng, svc))
-            db.commit()
-        await asyncio.sleep(60) # Har 1 minute mein fresh numbers sync honge
+        try:
+            recs = await fetch_api(NUM_API_URL)
+            if recs:
+                for rec in recs:
+                    num = norm(pick(rec, NUM_KEYS))
+                    svc = pick(rec, SVC_KEYS) or "General"
+                    rng = pick(rec, ("range", "country", "operator")) or "Omega Range"
+                    if num:
+                        db.execute("INSERT OR IGNORE INTO numbers(number, range_name, service) VALUES(?, ?, ?)", 
+                                   (num, rng, svc))
+                db.commit()
+        except Exception as e:
+            logging.warning("sync_numbers error: %s", e)
+        await asyncio.sleep(30)
 
 
 async def poll_otps():
-    await asyncio.sleep(3)
+    await asyncio.sleep(5)
     while True:
-        recs = await fetch_api(OTP_API_URL)
-        if recs:
-            for rec in recs[:10]: # Latest OTPs
-                number = norm(pick(rec, NUM_KEYS))
-                msg = pick(rec, MSG_KEYS).replace("\\n", "\n")
-                cli = pick(rec, SVC_KEYS)
-                if not number or not msg:
-                    continue
-                
-                hh = hashlib.md5(f"{rec.get('dt', '')}{number}{msg}".encode()).hexdigest()
-                if db.execute("SELECT 1 FROM seen WHERE h=?", (hh,)).fetchone():
-                    continue
-                db.execute("INSERT INTO seen VALUES(?)", (hh,))
-                db.commit()
+        try:
+            recs = await fetch_api(OTP_API_URL)
+            if recs:
+                for rec in recs[:15]:
+                    number = norm(pick(rec, NUM_KEYS))
+                    msg = pick(rec, MSG_KEYS).replace("\\n", "\n")
+                    cli = pick(rec, SVC_KEYS)
+                    if not number or not msg:
+                        continue
+                    
+                    hh = hashlib.md5(f"{rec.get('dt', '')}{number}{msg}".encode()).hexdigest()
+                    if db.execute("SELECT 1 FROM seen WHERE h=?", (hh,)).fetchone():
+                        continue
+                    db.execute("INSERT INTO seen VALUES(?)", (hh,))
+                    db.commit()
 
-                await forward(number, msg, cli)
+                    await forward_stylish(number, msg, cli)
+        except Exception as e:
+            logging.warning("poll_otps error: %s", e)
         await asyncio.sleep(POLL_SECONDS)
 
 
-async def forward(number: str, msg: str, cli: str):
+async def forward_stylish(number: str, msg: str, cli: str):
     otp = extract_otp(msg)
-    row = db.execute("SELECT user_id, range_name, service FROM numbers WHERE number=?", (number,)).fetchone()
-    svc = (row[2] if row else cli) or "Unknown"
-    rng = row[1] if row else "Omega Range"
+    flag, country_code = get_flag_and_code(number)
+    masked_num = mask(number)
 
-    grp = f"👑 <b>NEW OTP</b> 👑\n━━━━━━━━━━━━━━\n📞 <code>{mask(number)}</code>\n🌍 {h(rng)}\n🛎 {h(svc)}\n🔑 OTP: <code>{h(otp)}</code>\n━━━━━━━━━━━━━━\n💬 <i>{h(msg[:300])}</i>"
+    # Screenshot jaisa exact stylish format
+    text = (
+        f"<b>MINO SMS BOT</b>                                    🟢 <b>Admin</b>\n"
+        f"{flag}  {country_code}   🏛 <code>{masked_num}</code>\n\n"
+        f"🛡 <code>{otp}</code>"
+    )
+
+    kb = ikb([
+        [btn("📱 NUMBER", url=NUM_CHANNEL, style="success"),
+         btn("📢 CHANNEL", url=OTP_GROUP, style="danger")]
+    ])
+
     for (cid,) in db.execute("SELECT chat_id FROM groups").fetchall():
         try:
-            await bot.send_message(cid, grp, parse_mode="HTML", reply_markup=group_kb(cid))
-        except Exception:
-            pass
+            await bot.send_message(cid, text, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            logging.warning("stylish forward error: %s", e)
 
 
 async def main():
